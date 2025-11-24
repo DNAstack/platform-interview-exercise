@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallet
+  namespace: wallet
+  labels:
+    app: wallet
+    app.kubernetes.io/name: wallet
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: wallet
+  template:
+    metadata:
+      labels:
+        app: wallet
+        app.kubernetes.io/name: wallet
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      serviceAccountName: wallet
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 2000
+      initContainers:
+        - name: rename-heap-dump
+          image: ubuntu:20.04
+          command: ["bash","-c","if [[ -f /dumps/oom.bin ]]; then mv /dumps/oom.bin /dumps/oom-$(date +%s).bin; fi"]
+          resources:
+            requests: 
+              cpu: "50m"
+              memory: "300Mi"
+            limits: 
+              cpu: "50m"
+              memory: "300Mi"
+          volumeMounts:
+            - name: heap-dumps
+              mountPath: /dumps
+      containers:
+        - name: wallet
+          image: registry.example.com/dnastack/wallet@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: WALLET_URL
+              value: "https://wallet.example.internal"
+            - name: SPRING_DATASOURCE_URL
+              value: "jdbc:postgresql://postgres.wallet.svc.cluster.local:5432/wallet"
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: wallet-db-credentials
+                  key: username
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: wallet-db-credentials
+                  key: password
+            - name: APP_JDBI_ENCRYPTION_KEYS_WALLET_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wallet-master-key
+                  key: key
+            - name: LOGGING_LEVEL_COM_DNASTACK_WALLET
+              value: "INFO"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet: 
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 3
+            failureThreshold: 60 
+          readinessProbe:
+            httpGet: 
+              path: /actuator/health
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: 
+              path: /actuator/health
+              port: 8080
+            periodSeconds: 20
+            failureThreshold: 5
+          volumeMounts:
+            - name: heap-dumps
+              mountPath: /dumps
+      volumes:
+        - name: heap-dumps
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["wallet"]
